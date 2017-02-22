@@ -3,12 +3,18 @@ Views for building plugins.
 """
 
 from abc import abstractmethod
+import logging
 
 from django.conf import settings
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import render_to_response
 from django.templatetags.static import static
+from django.views.generic import View
+from edxmako.shortcuts import render_to_string
+from web_fragments.fragment import Fragment
+from web_fragments.views import FragmentView, WEB_FRAGMENT_RESPONSE_TYPE
 
-from web_fragments.views import FragmentView
+log = logging.getLogger('plugin_api')
 
 
 class EdxFragmentView(FragmentView):
@@ -87,3 +93,54 @@ class EdxFragmentView(FragmentView):
             'uses-pattern-library': self.USES_PATTERN_LIBRARY,
         }
         return render_to_response(settings.STANDALONE_FRAGMENT_VIEW_TEMPLATE, context)
+
+
+class FragmentContainerView(View):
+    """
+    The base class of views that wrap a fragment.
+    """
+
+    @abstractmethod
+    def render_fragment(self, request):
+        """
+        Not implemented yet.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def render_fragment_to_string(self, request, fragment, **kwargs):
+        """
+        Renders the fragment to a string.
+        """
+        raise NotImplementedError()
+
+    def render_fragment_to_response(self, request, **kwargs):
+        """
+        Renders a fragment to the HTTP response.
+
+        This method renders a fragment either as an HTML or JSON response.
+
+        Args:
+            request: The Django request.
+            **kwargs: Keyword arguments for render_fragment and render_fragment_to_string.
+
+        Returns:
+            HttpResponse: the HTTP response containing the fragment.
+        """
+        try:
+            fragment = self.render_fragment(request, **kwargs)
+            status_code = 200
+        except Http404:
+            raise  # re-raise 404s
+        except Exception:  # pylint: disable=broad-except
+            log.exception(u'Error rendering fragment')
+            error_message = render_to_string('courseware/error-message.html', None)
+            fragment = Fragment(error_message)
+            status_code = 500
+
+        response_format = request.GET.get('format') or request.POST.get('format') or 'html'
+        if response_format == 'json' or WEB_FRAGMENT_RESPONSE_TYPE in request.META.get('HTTP_ACCEPT', 'text/html'):
+            return JsonResponse(fragment.to_dict(), status=status_code)
+        else:
+            response_string = self.render_fragment_to_string(request, fragment, **kwargs)
+            return HttpResponse(response_string, status=status_code)

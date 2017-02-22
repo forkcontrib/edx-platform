@@ -18,7 +18,14 @@ from django.core.urlresolvers import reverse
 from django.core.context_processors import csrf
 from django.db import transaction
 from django.db.models import Q
-from django.http import Http404, HttpResponse, HttpResponseBadRequest, HttpResponseForbidden, JsonResponse, QueryDict
+from django.http import (
+    Http404,
+    HttpResponse,
+    HttpResponseBadRequest,
+    HttpResponseForbidden,
+    JsonResponse,
+    QueryDict,
+)
 from django.shortcuts import redirect
 from django.utils.decorators import method_decorator
 from django.utils.timezone import UTC
@@ -79,6 +86,7 @@ from openedx.core.djangoapps.credit.api import (
     is_user_eligible_for_credit,
     is_credit_course
 )
+from openedx.core.djangoapps.plugin_api.views import FragmentContainerView
 from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
 from shoppingcart.utils import is_shopping_cart_enabled
 from openedx.core.djangoapps.self_paced.models import SelfPacedConfiguration
@@ -205,7 +213,7 @@ def get_current_child(xmodule, min_depth=None, requested_child=None):
             content_children = [
                 child for child in child_modules
                 if child.has_children_at_depth(min_depth - 1) and child.get_display_items()
-            ]
+                ]
             return _get_child(content_children) if content_children else None
 
     child = None
@@ -442,44 +450,47 @@ def get_last_accessed_courseware(course, request, user):
     return None
 
 
-@ensure_csrf_cookie
-@ensure_valid_course_key
-def static_tab(request, course_id, tab_slug):
+class StaticCourseTabView(FragmentContainerView):
     """
-    Display the courses tab with the given name.
-
-    Assumes the course_id is in a valid format.
+    View that displays a static course tab with a given name.
     """
+    @method_decorator(ensure_csrf_cookie)
+    @method_decorator(ensure_valid_course_key)
+    def get(self, request, course_id, tab_slug, **kwargs):
+        """
+        Displays a static course tab page with a given name
+        """
+        course_key = CourseKey.from_string(course_id)
+        course = get_course_with_access(request.user, 'load', course_key)
+        tab = CourseTabList.get_tab_by_slug(course.tabs, tab_slug)
+        if tab is None:
+            raise Http404
+        return self.render_fragment_to_response(request, course=course, tab=tab, **kwargs)
 
-    course_key = CourseKey.from_string(course_id)
+    def render_fragment(self, request, course=None, tab=None, **kwargs):
+        """
+        Renders the course tab's fragment.
+        """
+        return get_static_tab_fragment(request, course, tab)
 
-    course = get_course_with_access(request.user, 'load', course_key)
-
-    tab = CourseTabList.get_tab_by_slug(course.tabs, tab_slug)
-    if tab is None:
-        raise Http404
-
-    fragment = get_static_tab_fragment(
-        request,
-        course,
-        tab
-    )
-
-    return render_to_response('courseware/static_tab.html', {
-        'course': course,
-        'active_page': 'static_tab_{0}'.format(tab['url_slug']),
-        'tab': tab,
-        'fragment': fragment,
-        'uses_pattern_library': False,
-        'disable_courseware_js': True,
-    })
+    def render_fragment_to_string(self, request, fragment, course=None, tab=None, **kwargs):
+        """
+        Renders the fragment to a string.
+        """
+        return render_to_response('courseware/static_tab.html', {
+            'course': course,
+            'active_page': 'static_tab_{0}'.format(tab['url_slug']),
+            'tab': tab,
+            'fragment': fragment,
+            'uses_pattern_library': False,
+            'disable_courseware_js': True,
+        })
 
 
-class CourseTabView(View):
+class CourseTabView(FragmentContainerView):
     """
     View that displays a course tab page.
     """
-
     @method_decorator(ensure_csrf_cookie)
     @method_decorator(ensure_valid_course_key)
     def get(self, request, course_id, tab_type, **kwargs):
@@ -489,21 +500,29 @@ class CourseTabView(View):
         course_key = CourseKey.from_string(course_id)
         course = get_course_with_access(request.user, 'load', course_key)
         tab = [tab for tab in course.tabs if tab.type == tab_type][0]
-        fragment = tab.render_fragment(request, course, **kwargs)
+        return self.render_fragment_to_response(request, course=course, tab=tab, **kwargs)
 
-        response_format = request.GET.get('format') or request.POST.get('format') or 'html'
-        if response_format == 'json' or WEB_FRAGMENT_RESPONSE_TYPE in request.META.get('HTTP_ACCEPT', 'text/html'):
-            return JsonResponse(fragment.to_dict())
-        else:
-            return render_to_response('courseware/tab-view.html', {
+    def render_fragment(self, request, course=None, tab=None, **kwargs):
+        """
+        Renders the course tab's fragment.
+        """
+        return tab.render_fragment(request, course, **kwargs)
+
+    def render_fragment_to_string(self, request, fragment, course=None, tab=None, **kwargs):
+        """
+        Renders the fragment to a string.
+        """
+        return render_to_string(
+            'courseware/tab-view.html',
+            {
                 'course': course,
                 'active_page': tab['type'],
                 'tab': tab,
                 'fragment': fragment,
                 'uses_pattern_library': True,
                 'disable_courseware_js': True,
-            })
-
+            },
+        )
 
 @ensure_csrf_cookie
 @ensure_valid_course_key
@@ -514,7 +533,7 @@ def syllabus(request, course_id):
     Assumes the course_id is in a valid format.
     """
 
-    course_key = CourseKey.from_string(course_id)
+    course_key = SlashSeparatedCourseKey.from_deprecated_string(course_id)
 
     course = get_course_with_access(request.user, 'load', course_key)
     staff_access = bool(has_access(request.user, 'staff', course))
@@ -622,7 +641,7 @@ def course_about(request, course_id):
     Assumes the course_id is in a valid format.
     """
 
-    course_key = CourseKey.from_string(course_id)
+    course_key = SlashSeparatedCourseKey.from_deprecated_string(course_id)
 
     if hasattr(course_key, 'ccx'):
         # if un-enrolled/non-registered user try to access CCX (direct for registration)
